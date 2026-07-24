@@ -7,15 +7,25 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import firebase_admin
 from firebase_admin import credentials, db
-
+import os
+import json
+from firebase_admin import credentials, db
 app = Flask(__name__)
 CORS(app)
 
 # 1. Initialize Firebase Admin SDK
-cred = credentials.Certificate("serviceAccountKey.json")
-firebase_admin.initialize_app(cred, {
-    'databaseURL': 'https://soil-quality-data-946da-default-rtdb.firebaseio.com'
-})
+
+
+service_account = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
+
+cred = credentials.Certificate(service_account)
+
+firebase_admin.initialize_app(
+    cred,
+    {
+        "databaseURL": "https://soil-quality-data-946da-default-rtdb.firebaseio.com"
+    }
+)
 
 # 2. Load ML Model & Label Encoder
 with open('crop_model.pkl', 'rb') as model_file:
