@@ -2,7 +2,7 @@ import os
 import pickle
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Flask, jsonify
 from flask_cors import CORS
 import firebase_admin
@@ -49,7 +49,8 @@ RAINFALL_TRAIN_MAX = 298.56
 # single instantaneous reading is not representative — this smooths it out.
 RECOMMENDATION_WINDOW_SIZE = 20
 
-# Humidity sensor isn't wired up yet — safe baseline percentage used until it is.
+# Last-resort fallback if a humidity reading can't be found anywhere in the
+# window or on the latest entry (e.g. sensor briefly offline).
 AVERAGE_HUMIDITY_PLACEHOLDER = 60.0
 
 # Format the device writes into Firebase, e.g. "2026-07-16 19:17:36"
@@ -61,23 +62,24 @@ _rainfall_cache = {'value': None, 'fetched_at': None}
 def get_recent_rainfall_mm():
     """Sum of actual precipitation (mm) over the last RAINFALL_WINDOW_DAYS for Akure.
     Cached for RAINFALL_CACHE_TTL since this doesn't need to be refetched every request."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     cache_age = now - _rainfall_cache['fetched_at'] if _rainfall_cache['fetched_at'] else None
     if _rainfall_cache['value'] is not None and cache_age is not None and cache_age < RAINFALL_CACHE_TTL:
         return _rainfall_cache['value']
 
-    end_date = (now - timedelta(days=1)).date()   # archive data usually lags ~1 day
-    start_date = end_date - timedelta(days=RAINFALL_WINDOW_DAYS)
-
     try:
+        # The forecast endpoint's `past_days` param returns the same daily
+        # aggregates as the archive API but with only a few hours of lag
+        # instead of ~1 day, and needs no manual date-range math.
+        # forecast_days=0 keeps future/forecast precipitation out of the sum.
         resp = requests.get(
-            "https://archive-api.open-meteo.com/v1/archive",
+            "https://api.open-meteo.com/v1/forecast",
             params={
                 "latitude": AKURE_LAT,
                 "longitude": AKURE_LON,
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
                 "daily": "precipitation_sum",
+                "past_days": RAINFALL_WINDOW_DAYS,
+                "forecast_days": 0,
                 "timezone": "auto",
             },
             timeout=10,
@@ -133,7 +135,7 @@ def compute_windowed_average(all_logs, log_keys, window_size):
     most recent `window_size` Firebase entries, instead of trusting a single
     (possibly noisy) latest reading."""
     recent_keys = log_keys[-window_size:]
-    fields = ['nitrogen', 'phosphorus', 'potassium', 'temperature']
+    fields = ['nitrogen', 'phosphorus', 'potassium', 'temperature', 'humidity']
     sums = {f: 0.0 for f in fields}
     counts = {f: 0 for f in fields}
 
@@ -187,12 +189,14 @@ def get_dashboard_data():
         # Fall back to the single latest reading for any field that couldn't
         # be averaged (e.g. not enough history yet). Not enforced strictly
         # for now — revisit once there's a reliable backlog of readings.
-        for f in ['nitrogen', 'phosphorus', 'potassium', 'temperature']:
+        # Humidity's last-resort fallback is the placeholder baseline rather
+        # than 0.0, since 0% humidity isn't a sane model input.
+        for f in ['nitrogen', 'phosphorus', 'potassium', 'temperature', 'humidity']:
             if averaged[f] is None:
                 try:
                     averaged[f] = float(latest_reading.get(f))
                 except (TypeError, ValueError):
-                    averaged[f] = 0.0
+                    averaged[f] = AVERAGE_HUMIDITY_PLACEHOLDER if f == 'humidity' else 0.0
 
         # Merge raw rainfall + placeholder humidity into the latest reading for dashboard display.
         latest_reading['rainfall'] = rainfall_raw
@@ -253,4 +257,4 @@ def get_dashboard_data():
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run()
